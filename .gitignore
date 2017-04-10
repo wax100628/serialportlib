@@ -1,0 +1,4 @@
+*.sdf
+/ipch/
+/serialportlib/Debug/
+/serialportlib/Release/
