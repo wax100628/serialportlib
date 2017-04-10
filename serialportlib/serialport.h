@@ -84,8 +84,8 @@ namespace LuHang{
 		int getBitsNum() const;																				// 获取字节位数设置
 
 		/** open and close */
-		bool open(const char *lpName, CommunicateProtocol cp = CommunicateProtocol::ASYNCIO);		// 打开串口
-		void close();																				// 关闭串口
+		bool open(const char *lpName, CommunicateProtocol cp = CommunicateProtocol::ASYNCIO);				// 打开串口
+		void close();																						// 关闭串口
 
 		/** read and write */
 		int read(unsigned char *buf, unsigned int len);														// 读取串口数据
