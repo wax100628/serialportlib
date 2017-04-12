@@ -74,13 +74,12 @@ bool SerialPort::open(const char *lpName, CommunicateProtocol cp)
 
 	// 设置串口默认属性
 	GetCommState(hFile, &mDCB);
-    setBinaryMode(false);
     setFlowControl(mFC);
     // 超时设置
     GetCommTimeouts(hFile, &mCommTimeout);
     mCommTimeout.ReadIntervalTimeout = 500;
     mCommTimeout.ReadTotalTimeoutMultiplier = 500;
-    mCommTimeout.ReadTotalTimeoutConstant = 2000;   
+    mCommTimeout.ReadTotalTimeoutConstant = 250;   
     mCommTimeout.WriteTotalTimeoutMultiplier = 500;
     mCommTimeout.WriteTotalTimeoutConstant = 2000;
     SetCommTimeouts(hFile, &mCommTimeout);
@@ -106,7 +105,7 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 
     // 临界区加锁
 	lock();
-	DWORD bytesReaded = len;
+	DWORD bytesReaded = 0;
     COMSTAT rdStat;
     DWORD dwErrFlags;
 	BOOL rf = TRUE;
@@ -120,20 +119,17 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 
 	// 清除错误标志
 	ClearCommError(hFile, &dwErrFlags, &rdStat);
-	bytesReaded = min(bytesReaded, rdStat.cbInQue);
+	// bytesReaded = min(bytesReaded, rdStat.cbInQue);
 	// 获取串口输入缓冲区的字节数
-	if (!bytesReaded)
-		return 0;
-
 
 	if (mCP == CommunicateProtocol::ASYNCIO)
 	{  
 		// 异步方式读取数据
-		rf = ReadFile(hFile, buf, bytesReaded, &bytesReaded, &rdOL);
+		rf = ReadFile(hFile, buf, len, &bytesReaded, &rdOL);
 	}		
 	else
 		// 同步方式读取
-		rf = ReadFile(hFile, buf, bytesReaded, &bytesReaded, NULL);
+		rf = ReadFile(hFile, buf, len, &bytesReaded, NULL);
 
 	if (!rf)
 	{
@@ -143,17 +139,9 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 #if 1
 			if (mCP == CommunicateProtocol::ASYNCIO)
 			{
-				DWORD wait_ret = WaitForSingleObject(rdOL.hEvent, 1000);
-				switch(wait_ret)
-				{
-					// func failed
-				case WAIT_FAILED: PurgeComm(hFile, PURGE_RXCLEAR); return -1;
-					// func success status
-				case WAIT_TIMEOUT:
-				case WAIT_ABANDONED: return 0;
-				case WAIT_OBJECT_0:  return bytesReaded;
-				default: return bytesReaded;
-				}
+				WaitForSingleObject(rdOL.hEvent, 5000);
+				GetOverlappedResult(hFile, &rdOL, &bytesReaded, TRUE);
+				return bytesReaded;
 			}
 			else
 			{
@@ -169,7 +157,7 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 		}
 		else
 		{
-			PurgeComm(hFile, PURGE_RXCLEAR);
+			PurgeComm(hFile, PURGE_RXCLEAR|PURGE_RXABORT);
 			unlock();
 			return -1;
 		}
