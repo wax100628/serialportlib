@@ -1,1 +1,1 @@
-- **A EXTREMLY SIMPLE LIB FOR SERIAL PORT ON Windows**
+- **A Simple Lib for Serial Port on Windows**
