@@ -137,17 +137,46 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 		{
 			
 #if 1
+
+
+#if 0
 			if (mCP == CommunicateProtocol::ASYNCIO)
 			{
-				WaitForSingleObject(rdOL.hEvent, 3000);
+				WaitForSingleObject(rdOL.hEvent, 250);
 				GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
-				PurgeComm(mHCom, PURGE_RXCLEAR | PURGE_RXABORT);
+				CloseHandle(rdOL.hEvent);
 				return bytesReaded;
 			}
 			else
 			{
 				unlock();
 				return 0;
+			}
+#endif
+			if (mCP == CommunicateProtocol::ASYNCIO)
+			{
+				DWORD wait_ret = WaitForSingleObject(rdOL.hEvent, 200);
+				switch (wait_ret)
+				{
+					// func failed
+				case WAIT_FAILED: 
+					PurgeComm(mHCom, PURGE_RXCLEAR); 
+					CloseHandle(rdOL.hEvent);
+					return -1;
+					// func success status
+				case WAIT_TIMEOUT:
+				case WAIT_ABANDONED:
+				case WAIT_OBJECT_0:
+					GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
+					CloseHandle(rdOL.hEvent);
+					return bytesReaded;
+
+				default: return bytesReaded;
+				}
+			}
+			else
+			{
+				return bytesReaded;
 			}
 
 #else
@@ -160,11 +189,16 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 		{
 			PurgeComm(mHCom, PURGE_RXCLEAR|PURGE_RXABORT);
 			unlock();
+			if (mCP == CommunicateProtocol::ASYNCIO)
+				CloseHandle(rdOL.hEvent);
 			return -1;
 		}
 	}
 
 	unlock();
+	if (mCP == CommunicateProtocol::ASYNCIO)
+		CloseHandle(rdOL.hEvent);
+
 	return bytesReaded;
 }
 
@@ -185,15 +219,15 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 
 	BOOL ret = TRUE;
 	DWORD bytesSent = 0;
-	COMSTAT wrStat;
-	DWORD dwErrFlags;
+//	COMSTAT wrStat;
+//	DWORD dwErrFlags;
 
 	if (mCP == CommunicateProtocol::ASYNCIO)
 	{
 		memset(&wrOL, 0, sizeof(OVERLAPPED));
 		wrOL.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 		// 清除错误标志
-		ClearCommError(mHCom, &dwErrFlags, &wrStat);
+		// ClearCommError(mHCom, &dwErrFlags, &wrStat);
 		// 异步写入数据 
 		ret = WriteFile(mHCom,
 			buf2write,
@@ -212,7 +246,7 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 	DWORD dwErr = GetLastError();
 	if (!ret)
 	{
-		if (ERROR_IO_PENDING == dwErr || ERROR_IO_INCOMPLETE == dwErr)
+		if (ERROR_IO_PENDING == dwErr)
 		{
 			if (mCP == CommunicateProtocol::ASYNCIO)
             {
@@ -224,7 +258,10 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
                     // func success status
                     case WAIT_TIMEOUT: 
 					case WAIT_ABANDONED:
-                    case WAIT_OBJECT_0: return bytesSent;
+					case WAIT_OBJECT_0: 
+						GetOverlappedResult(mHCom, &wrOL, &bytesSent, TRUE); 
+						CloseHandle(wrOL.hEvent);
+						return bytesSent;
                     default: return bytesSent;
                 }
             }
@@ -236,9 +273,14 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 		else
         {
             PurgeComm(mHCom, PURGE_TXCLEAR);
+			if (mCP == CommunicateProtocol::ASYNCIO)
+				CloseHandle(wrOL.hEvent);
             return -1;
         }
 	}
+
+	if (mCP == CommunicateProtocol::ASYNCIO)
+		CloseHandle(wrOL.hEvent);
 
 	return bytesSent;
 }
