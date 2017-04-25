@@ -4,7 +4,7 @@
 Release
 Debug
 ipch
-wrpctr4.pdb
+wrpcrt4.pdb
 oleaut32.pdb
 /serialportlib/Debug/
 /serialportlib/Release/
