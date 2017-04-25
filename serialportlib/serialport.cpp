@@ -13,7 +13,7 @@
 using namespace LuHang;
 
 SerialPort::SerialPort() :
-	hFile(INVALID_HANDLE_VALUE),
+	mHCom(INVALID_HANDLE_VALUE),
     mFC(FlowControl::NONE)
 {
 	InitializeCriticalSection(&mLock);
@@ -58,7 +58,7 @@ bool SerialPort::open(const char *lpName, CommunicateProtocol cp)
 	*io_method                            I/O数据传输方式, 异步或同步, 默认异步
 	*NULL：                               禁用文件属性模板, 参见Win32API
 	*/
-	hFile = CreateFile(buffer, \
+	mHCom = CreateFile(buffer, \
 		GENERIC_READ | GENERIC_WRITE, \
 		0, \
 		NULL, \
@@ -67,22 +67,22 @@ bool SerialPort::open(const char *lpName, CommunicateProtocol cp)
 		NULL);
 
 	delete buffer;
-	if (hFile == INVALID_HANDLE_VALUE)
+	if (mHCom == INVALID_HANDLE_VALUE)
 	{
 		return false;
 	}
 
 	// 设置串口默认属性
-	GetCommState(hFile, &mDCB);
+	GetCommState(mHCom, &mDCB);
     setFlowControl(mFC);
     // 超时设置
-    GetCommTimeouts(hFile, &mCommTimeout);
-    mCommTimeout.ReadIntervalTimeout = 500;
-    mCommTimeout.ReadTotalTimeoutMultiplier = 500;
-    mCommTimeout.ReadTotalTimeoutConstant = 250;   
-    mCommTimeout.WriteTotalTimeoutMultiplier = 500;
-    mCommTimeout.WriteTotalTimeoutConstant = 2000;
-    SetCommTimeouts(hFile, &mCommTimeout);
+    //GetCommTimeouts(mHCom, &mCommTimeout);
+    //mCommTimeout.ReadIntervalTimeout = 500;
+    //mCommTimeout.ReadTotalTimeoutMultiplier = 500;
+    //mCommTimeout.ReadTotalTimeoutConstant = 250;   
+    //mCommTimeout.WriteTotalTimeoutMultiplier = 500;
+    //mCommTimeout.WriteTotalTimeoutConstant = 2000;
+    //SetCommTimeouts(mHCom, &mCommTimeout);
     
 	return true;
 }
@@ -97,7 +97,7 @@ bool SerialPort::open(const char *lpName, CommunicateProtocol cp)
 **/
 int SerialPort::read(unsigned char *buf, unsigned int len)
 {
-	if (hFile == INVALID_HANDLE_VALUE || \
+	if (mHCom == INVALID_HANDLE_VALUE || \
 		buf == NULL)
 	{
 		return -1;
@@ -105,9 +105,9 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 
     // 临界区加锁
 	lock();
-	DWORD bytesReaded = 0;
-    COMSTAT rdStat;
-    DWORD dwErrFlags;
+	DWORD bytesReaded = len;
+    //COMSTAT rdStat;
+    //DWORD dwErrFlags;
 	BOOL rf = TRUE;
 
 	if (mCP == CommunicateProtocol::ASYNCIO)
@@ -118,18 +118,18 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 	}
 
 	// 清除错误标志
-	ClearCommError(hFile, &dwErrFlags, &rdStat);
-	// bytesReaded = min(bytesReaded, rdStat.cbInQue);
+	// ClearCommError(mHCom, &dwErrFlags, &rdStat);
+	bytesReaded = min(bytesReaded, getBytesInCom());
 	// 获取串口输入缓冲区的字节数
 
 	if (mCP == CommunicateProtocol::ASYNCIO)
 	{  
 		// 异步方式读取数据
-		rf = ReadFile(hFile, buf, len, &bytesReaded, &rdOL);
+		rf = ReadFile(mHCom, buf, len, &bytesReaded, &rdOL);
 	}		
 	else
 		// 同步方式读取
-		rf = ReadFile(hFile, buf, len, &bytesReaded, NULL);
+		rf = ReadFile(mHCom, buf, len, &bytesReaded, NULL);
 
 	if (!rf)
 	{
@@ -139,8 +139,9 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 #if 1
 			if (mCP == CommunicateProtocol::ASYNCIO)
 			{
-				WaitForSingleObject(rdOL.hEvent, 5000);
-				GetOverlappedResult(hFile, &rdOL, &bytesReaded, TRUE);
+				WaitForSingleObject(rdOL.hEvent, 3000);
+				GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
+				PurgeComm(mHCom, PURGE_RXCLEAR | PURGE_RXABORT);
 				return bytesReaded;
 			}
 			else
@@ -152,12 +153,12 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 #else
 			BOOL ret = true;
 			if (mCP == CommunicateProtocol::ASYNCIO)
-				ret = GetOverlappedResult(hFile, &rdOL, &bytesReaded, TRUE);
+				ret = GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
 #endif
 		}
 		else
 		{
-			PurgeComm(hFile, PURGE_RXCLEAR|PURGE_RXABORT);
+			PurgeComm(mHCom, PURGE_RXCLEAR|PURGE_RXABORT);
 			unlock();
 			return -1;
 		}
@@ -177,7 +178,7 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 **/
 int SerialPort::write(unsigned char* buf2write, unsigned int len)
 {
-	if (hFile == INVALID_HANDLE_VALUE)
+	if (mHCom == INVALID_HANDLE_VALUE)
 	{
 		return -1;
 	}
@@ -192,9 +193,9 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 		memset(&wrOL, 0, sizeof(OVERLAPPED));
 		wrOL.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 		// 清除错误标志
-		ClearCommError(hFile, &dwErrFlags, &wrStat);
+		ClearCommError(mHCom, &dwErrFlags, &wrStat);
 		// 异步写入数据 
-		ret = WriteFile(hFile,
+		ret = WriteFile(mHCom,
 			buf2write,
 			len,
 			&bytesSent,
@@ -202,7 +203,7 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 	}
 	else
 		// 同步写
-		ret = WriteFile(hFile,
+		ret = WriteFile(mHCom,
 		buf2write,
 		len,
 		&bytesSent,
@@ -219,7 +220,7 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
                 switch(wait_ret)
                 {
                     // func failed
-                    case WAIT_FAILED: PurgeComm(hFile, PURGE_TXCLEAR); return -1;
+                    case WAIT_FAILED: PurgeComm(mHCom, PURGE_TXCLEAR); return -1;
                     // func success status
                     case WAIT_TIMEOUT: 
 					case WAIT_ABANDONED:
@@ -234,7 +235,7 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 		}
 		else
         {
-            PurgeComm(hFile, PURGE_TXCLEAR);
+            PurgeComm(mHCom, PURGE_TXCLEAR);
             return -1;
         }
 	}
@@ -251,18 +252,32 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 **/
 unsigned int SerialPort::getBytesInCom() const
 {
-	DWORD dwError = 0;  /** 错误码 */
-	COMSTAT  comstat;   /** COMSTAT结构体,记录通信设备的状态信息 */
+	/** 错误码 */
+	DWORD dwError = 0;
+	/** COMSTAT结构体,记录通信设备的状态信息 */
+	COMSTAT  comstat;
 	memset(&comstat, 0, sizeof(COMSTAT));
 
-	UINT BytesInQue = 0;
-	/** 在调用ReadFile和WriteFile之前,通过本函数清除以前遗留的错误标志 */
-	if (ClearCommError(hFile, &dwError, &comstat))
+	UINT dwInQueBefore = 0;
+	UINT dwSize = 0;
+	if (ClearCommError(mHCom, &dwError, &comstat))
+		dwInQueBefore = comstat.cbInQue;
+
+	Sleep(18);
+
+	if (!ClearCommError(mHCom, &dwError, &comstat))
+		return 0;
+
+	while ((dwSize = comstat.cbInQue) != dwInQueBefore)
 	{
-		BytesInQue = comstat.cbInQue; /** 获取在输入缓冲区中的字节数 */
+		dwInQueBefore = dwSize;
+		Sleep(18);
+		if (!ClearCommError(mHCom, &dwError, &comstat))
+			break;
+
 	}
 
-	return BytesInQue;
+	return dwSize;
 }
 
 /**
@@ -274,7 +289,7 @@ unsigned int SerialPort::getBytesInCom() const
 **/
 int SerialPort::getBaudRate() const
 {
-	return (hFile == INVALID_HANDLE_VALUE ? -1 : mDCB.BaudRate);
+	return (mHCom == INVALID_HANDLE_VALUE ? -1 : mDCB.BaudRate);
 }
 
 /**
@@ -286,7 +301,7 @@ int SerialPort::getBaudRate() const
 **/
 int SerialPort::getBitsNum() const
 {
-	return (hFile == INVALID_HANDLE_VALUE ? -1 : mDCB.ByteSize);
+	return (mHCom == INVALID_HANDLE_VALUE ? -1 : mDCB.ByteSize);
 }
 
 /**
@@ -298,11 +313,11 @@ int SerialPort::getBitsNum() const
 **/
 bool SerialPort::setBaudRate(unsigned int baud_rate)
 {
-	if (INVALID_HANDLE_VALUE == hFile)
+	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
 
 	mDCB.BaudRate = baud_rate;
-	if (SetCommState(hFile, &mDCB))
+	if (SetCommState(mHCom, &mDCB))
 		return true;
 
 	return false;
@@ -317,11 +332,11 @@ bool SerialPort::setBaudRate(unsigned int baud_rate)
 **/
 bool SerialPort::setBitsNum(unsigned char bits_size)
 {
-	if (INVALID_HANDLE_VALUE == hFile)
+	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
 
 	mDCB.ByteSize = bits_size;
-	if (SetCommState(hFile, &mDCB))
+	if (SetCommState(mHCom, &mDCB))
 		return true;
 
 	return false;
@@ -336,11 +351,11 @@ bool SerialPort::setBitsNum(unsigned char bits_size)
 **/
 bool SerialPort::setStopBits(StopBits sb)
 {
-	if (INVALID_HANDLE_VALUE == hFile)
+	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
 
 	mDCB.StopBits = sb;
-	if (SetCommState(hFile, &mDCB))
+	if (SetCommState(mHCom, &mDCB))
 		return true;
 
 	return false;
@@ -355,11 +370,11 @@ bool SerialPort::setStopBits(StopBits sb)
 **/
 bool SerialPort::setParityEnable(bool enable)
 {
-	if (INVALID_HANDLE_VALUE == hFile)
+	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
 
 	mDCB.fParity = enable ? 1 : 0;
-	if (SetCommState(hFile, &mDCB))
+	if (SetCommState(mHCom, &mDCB))
 		return true;
 
 	return false;
@@ -374,11 +389,11 @@ bool SerialPort::setParityEnable(bool enable)
 **/
 bool SerialPort::setBinaryMode(bool enable)
 {
-	if (INVALID_HANDLE_VALUE == hFile)
+	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
 
 	mDCB.fBinary = enable ? 1 : 0;
-	if (SetCommState(hFile, &mDCB))
+	if (SetCommState(mHCom, &mDCB))
 		return true;
 
 	return false;
@@ -393,7 +408,7 @@ bool SerialPort::setBinaryMode(bool enable)
 **/
 void SerialPort::setFlowControl(FlowControl fc)
 {
-    if (INVALID_HANDLE_VALUE == hFile)
+    if (INVALID_HANDLE_VALUE == mHCom)
         return;
     
     mFC = fc;
@@ -430,11 +445,11 @@ void SerialPort::setFlowControl(FlowControl fc)
 **/
 bool SerialPort::setParity(Parity p)
 {
-	if (INVALID_HANDLE_VALUE == hFile)
+	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
 
 	mDCB.Parity = p;
-	if (SetCommState(hFile, &mDCB))
+	if (SetCommState(mHCom, &mDCB))
 		return true;
 
 	return false;
@@ -450,10 +465,10 @@ bool SerialPort::setParity(Parity p)
 **/
 bool SerialPort::setCommBufSize(unsigned int insize, unsigned int outsize)
 {
-    if(hFile == INVALID_HANDLE_VALUE)
+    if(mHCom == INVALID_HANDLE_VALUE)
         return false;
 
-	if (SetupComm(hFile, insize, outsize))
+	if (SetupComm(mHCom, insize, outsize))
 		return true;
 
 	return false;
@@ -490,17 +505,20 @@ void SerialPort::close()
 {
 	try
 	{
-		if (INVALID_HANDLE_VALUE != this->hFile)
+		if (INVALID_HANDLE_VALUE != this->mHCom)
 		{
-            // 禁止响应串口所有事件
-            SetCommMask(hFile, 0) ;
-            // 清除数据终端就绪信号
-            EscapeCommFunction( hFile, CLRDTR ) ;
+			if (mCP == CommunicateProtocol::ASYNCIO)
+			{
+				// 禁止响应串口所有事件
+				SetCommMask(mHCom, 0);
+				// 清除数据终端就绪信号
+				EscapeCommFunction(mHCom, CLRDTR);
+			}
             // 清理数据缓冲区|终止通信资源读写挂起操作
-            PurgeComm( hFile, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR ) ;
+            PurgeComm( mHCom, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR ) ;
             // 关闭串口句柄
-			CloseHandle(this->hFile);
-			this->hFile = INVALID_HANDLE_VALUE;
+			CloseHandle(this->mHCom);
+			this->mHCom = INVALID_HANDLE_VALUE;
 		}
 
 	}
@@ -529,7 +547,7 @@ int SerialPort::getError() const
 **/
 bool SerialPort::isOpen() const
 {
-	return (hFile != INVALID_HANDLE_VALUE);
+	return (mHCom != INVALID_HANDLE_VALUE);
 }
 
 /**
