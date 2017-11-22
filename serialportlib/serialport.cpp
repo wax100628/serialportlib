@@ -10,19 +10,48 @@
 **/
 
 #include "serialport.h"
+#include <atomic>
 using namespace LuHang;
 
-SerialPort::SerialPort() :
+static std::atomic<bool> stopped = false;
+
+SerialPort::SerialPort(fReadCallback pFun) :
 	mHCom(INVALID_HANDLE_VALUE),
-    mFC(FlowControl::NONE)
+    mFC(FlowControl::NONE),
+	pReadCallback(pFun),
+	thd(nullptr)
 {
 	InitializeCriticalSection(&mLock);
 }
 
 SerialPort::~SerialPort()
 {
+	stopped = true;
+	if (thd){
+		lock();
+		delete thd;
+		unlock();
+	}
+
     this->close();
     DeleteCriticalSection(&mLock);
+}
+
+void asread(SerialPort* ctx){
+	while (1){
+		if (stopped){
+			break;
+		}
+
+		auto* buf = new char[1024];
+		auto ret = ctx->read(buf, sizeof(buf));
+		if (ret > 0){
+			auto* pFun = ctx->getReadCallback();
+			pFun(buf, ret);
+		}
+
+		Sleep(10);
+	}
 }
 
 /**
@@ -33,37 +62,26 @@ SerialPort::~SerialPort()
 *@return                布尔值, 返回是否成功打开串口
 *
 **/
-bool SerialPort::open(const char *lpName, CommunicateProtocol cp)
+bool SerialPort::open(const char *lpName)
 {
 	if (lpName == nullptr || strnlen_s(lpName, 16) == 0)
 		return false;
 
-	size_t size = strlen(lpName);
+	char strCom[32] = { 0 };
+	sprintf_s(strCom, sizeof(strCom), "\\\\.\\%s", lpName);
+	size_t size = strlen(strCom);
 
 	// convert to wchar
 	wchar_t *buffer = new wchar_t[size + 1];
-	MultiByteToWideChar(CP_ACP, 0, lpName, size, buffer, size * sizeof(wchar_t));
+	MultiByteToWideChar(CP_ACP, 0, strCom, size, buffer, size * sizeof(wchar_t));
 	buffer[size] = 0;
 
-	// 设置I/O数据读写方式
-	mCP = cp;
-	DWORD io_method = (mCP == CommunicateProtocol::ASYNCIO ? FILE_FLAG_OVERLAPPED : 0);
-
-	/*
-	*buffer:                              串口号
-	*GENERIC_READ | GENERIC_WRITE：       允许读写
-	*0：                                  独占方式打开
-	*NULL：                               默认安全属性
-	*OPEN_EXISTING:                       Opens the file. The function fails if the file does not exist.
-	*io_method                            I/O数据传输方式, 异步或同步, 默认异步
-	*NULL：                               禁用文件属性模板, 参见Win32API
-	*/
 	mHCom = CreateFile(buffer, \
 		GENERIC_READ | GENERIC_WRITE, \
 		0, \
 		NULL, \
 		OPEN_EXISTING, \
-		io_method, \
+		FILE_FLAG_OVERLAPPED, \
 		NULL);
 
 	delete buffer;
@@ -75,16 +93,25 @@ bool SerialPort::open(const char *lpName, CommunicateProtocol cp)
 	// 设置串口默认属性
 	GetCommState(mHCom, &mDCB);
     setFlowControl(mFC);
-    // 超时设置
-    //GetCommTimeouts(mHCom, &mCommTimeout);
-    //mCommTimeout.ReadIntervalTimeout = 500;
-    //mCommTimeout.ReadTotalTimeoutMultiplier = 500;
-    //mCommTimeout.ReadTotalTimeoutConstant = 250;   
-    //mCommTimeout.WriteTotalTimeoutMultiplier = 500;
-    //mCommTimeout.WriteTotalTimeoutConstant = 2000;
-    //SetCommTimeouts(mHCom, &mCommTimeout);
+	setBaudRate();
+	setBitsNum();
+	setParity();
+	setParityEnable();
+	setBinaryMode();
+	setStopBits();
+	setCommBufSize();
+	setFlowControl();
+
+	if (pReadCallback){
+		thd = new std::thread(&asread, this);
+	}
     
 	return true;
+}
+
+fReadCallback SerialPort::getReadCallback() const
+{
+	return pReadCallback;
 }
 
 /**
@@ -95,109 +122,61 @@ bool SerialPort::open(const char *lpName, CommunicateProtocol cp)
 *@return	       返回实际读取的字节数;0 表示无数据, 处于等待状态;-1表示出错; >0 = 实际读取的字节数
 *
 **/
-int SerialPort::read(unsigned char *buf, unsigned int len)
+int32_t SerialPort::read(char *buf, uint32_t len)
 {
-	if (mHCom == INVALID_HANDLE_VALUE || \
-		buf == NULL)
+	if (mHCom == INVALID_HANDLE_VALUE
+		|| buf == NULL)
 	{
 		return -1;
 	}
 
-    // 临界区加锁
+	// 临界区加锁
 	lock();
 	DWORD bytesReaded = len;
-    //COMSTAT rdStat;
-    //DWORD dwErrFlags;
 	BOOL rf = TRUE;
 
-	if (mCP == CommunicateProtocol::ASYNCIO)
-	{
-		memset(&rdOL, 0, sizeof(OVERLAPPED));
-		// 创建初始event--没置位，无信号模式
-		rdOL.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-	}
+	memset(&rdOL, 0, sizeof(OVERLAPPED));
+	// 创建初始event--没置位，无信号模式
+	rdOL.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-	// 清除错误标志
-	// ClearCommError(mHCom, &dwErrFlags, &rdStat);
 	bytesReaded = min(bytesReaded, getBytesInCom());
 	// 获取串口输入缓冲区的字节数
-
-	if (mCP == CommunicateProtocol::ASYNCIO)
-	{  
-		// 异步方式读取数据
-		rf = ReadFile(mHCom, buf, len, &bytesReaded, &rdOL);
-	}		
-	else
-		// 同步方式读取
-		rf = ReadFile(mHCom, buf, len, &bytesReaded, NULL);
+	rf = ReadFile(mHCom, buf, len, &bytesReaded, &rdOL);
 
 	if (!rf)
 	{
 		if (GetLastError() == ERROR_IO_PENDING)
 		{
-			
-#if 1
-
-
-#if 0
-			if (mCP == CommunicateProtocol::ASYNCIO)
+			DWORD wait_ret = WaitForSingleObject(rdOL.hEvent, 250);
+			switch (wait_ret)
 			{
-				WaitForSingleObject(rdOL.hEvent, 250);
+				// func failed
+			case WAIT_FAILED:
+				PurgeComm(mHCom, PURGE_RXCLEAR);
+				CloseHandle(rdOL.hEvent);
+				return -1;
+				// func success status
+			case WAIT_TIMEOUT:
+			case WAIT_ABANDONED:
+			case WAIT_OBJECT_0:
 				GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
 				CloseHandle(rdOL.hEvent);
 				return bytesReaded;
-			}
-			else
-			{
-				unlock();
-				return 0;
-			}
-#endif
-			if (mCP == CommunicateProtocol::ASYNCIO)
-			{
-				DWORD wait_ret = WaitForSingleObject(rdOL.hEvent, 200);
-				switch (wait_ret)
-				{
-					// func failed
-				case WAIT_FAILED: 
-					PurgeComm(mHCom, PURGE_RXCLEAR); 
-					CloseHandle(rdOL.hEvent);
-					return -1;
-					// func success status
-				case WAIT_TIMEOUT:
-				case WAIT_ABANDONED:
-				case WAIT_OBJECT_0:
-					GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
-					CloseHandle(rdOL.hEvent);
-					return bytesReaded;
 
-				default: return bytesReaded;
-				}
+			default: return bytesReaded;
 			}
-			else
-			{
-				return bytesReaded;
-			}
-
-#else
-			BOOL ret = true;
-			if (mCP == CommunicateProtocol::ASYNCIO)
-				ret = GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
-#endif
 		}
 		else
 		{
-			PurgeComm(mHCom, PURGE_RXCLEAR|PURGE_RXABORT);
+			PurgeComm(mHCom, PURGE_RXCLEAR | PURGE_RXABORT);
 			unlock();
-			if (mCP == CommunicateProtocol::ASYNCIO)
-				CloseHandle(rdOL.hEvent);
+			CloseHandle(rdOL.hEvent);
 			return -1;
 		}
 	}
 
 	unlock();
-	if (mCP == CommunicateProtocol::ASYNCIO)
-		CloseHandle(rdOL.hEvent);
+	CloseHandle(rdOL.hEvent);
 
 	return bytesReaded;
 }
@@ -210,7 +189,7 @@ int SerialPort::read(unsigned char *buf, unsigned int len)
 *@return
 *
 **/
-int SerialPort::write(unsigned char* buf2write, unsigned int len)
+int32_t SerialPort::write(const char* buf2write, uint32_t len)
 {
 	if (mHCom == INVALID_HANDLE_VALUE)
 	{
@@ -219,11 +198,7 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 
 	BOOL ret = TRUE;
 	DWORD bytesSent = 0;
-//	COMSTAT wrStat;
-//	DWORD dwErrFlags;
 
-	if (mCP == CommunicateProtocol::ASYNCIO)
-	{
 		memset(&wrOL, 0, sizeof(OVERLAPPED));
 		wrOL.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 		// 清除错误标志
@@ -234,22 +209,12 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 			len,
 			&bytesSent,
 			&wrOL);
-	}
-	else
-		// 同步写
-		ret = WriteFile(mHCom,
-		buf2write,
-		len,
-		&bytesSent,
-		NULL);
 
 	DWORD dwErr = GetLastError();
 	if (!ret)
 	{
 		if (ERROR_IO_PENDING == dwErr)
 		{
-			if (mCP == CommunicateProtocol::ASYNCIO)
-            {
 				DWORD wait_ret = WaitForSingleObject(wrOL.hEvent, 1000);
                 switch(wait_ret)
                 {
@@ -264,23 +229,16 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 						return bytesSent;
                     default: return bytesSent;
                 }
-            }
-			else
-			{
-				return bytesSent;
-			}
 		}
 		else
         {
             PurgeComm(mHCom, PURGE_TXCLEAR);
-			if (mCP == CommunicateProtocol::ASYNCIO)
-				CloseHandle(wrOL.hEvent);
+			CloseHandle(wrOL.hEvent);
             return -1;
         }
 	}
 
-	if (mCP == CommunicateProtocol::ASYNCIO)
-		CloseHandle(wrOL.hEvent);
+	CloseHandle(wrOL.hEvent);
 
 	return bytesSent;
 }
@@ -292,7 +250,7 @@ int SerialPort::write(unsigned char* buf2write, unsigned int len)
 *@return                 返回输入缓冲区字节数
 *
 **/
-unsigned int SerialPort::getBytesInCom() const
+uint32_t SerialPort::getBytesInCom() const
 {
 	/** 错误码 */
 	DWORD dwError = 0;
@@ -305,18 +263,16 @@ unsigned int SerialPort::getBytesInCom() const
 	if (ClearCommError(mHCom, &dwError, &comstat))
 		dwInQueBefore = comstat.cbInQue;
 
-	Sleep(18);
-
 	if (!ClearCommError(mHCom, &dwError, &comstat))
 		return 0;
 
 	while ((dwSize = comstat.cbInQue) != dwInQueBefore)
 	{
 		dwInQueBefore = dwSize;
-		Sleep(18);
 		if (!ClearCommError(mHCom, &dwError, &comstat))
 			break;
 
+		Sleep(10);
 	}
 
 	return dwSize;
@@ -329,7 +285,7 @@ unsigned int SerialPort::getBytesInCom() const
 *@return                  返回当前串口波特率
 *
 **/
-int SerialPort::getBaudRate() const
+int32_t SerialPort::getBaudRate() const
 {
 	return (mHCom == INVALID_HANDLE_VALUE ? -1 : mDCB.BaudRate);
 }
@@ -341,7 +297,7 @@ int SerialPort::getBaudRate() const
 *@return int32      返回当前串口字节位数
 *
 **/
-int SerialPort::getBitsNum() const
+int32_t SerialPort::getBitsNum() const
 {
 	return (mHCom == INVALID_HANDLE_VALUE ? -1 : mDCB.ByteSize);
 }
@@ -353,7 +309,7 @@ int SerialPort::getBitsNum() const
 *@return bool             布尔值, 返回是否成功设置
 *
 **/
-bool SerialPort::setBaudRate(unsigned int baud_rate)
+bool SerialPort::setBaudRate(uint32_t baud_rate)
 {
 	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
@@ -372,7 +328,7 @@ bool SerialPort::setBaudRate(unsigned int baud_rate)
 *@return                   布尔值, 返回是否成功设置
 *
 **/
-bool SerialPort::setBitsNum(unsigned char bits_size)
+bool SerialPort::setBitsNum(uint8_t bits_size)
 {
 	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
@@ -505,7 +461,7 @@ bool SerialPort::setParity(Parity p)
 *@return                        布尔值, 返回是否成功设置
 *
 **/
-bool SerialPort::setCommBufSize(unsigned int insize, unsigned int outsize)
+bool SerialPort::setCommBufSize(uint32_t insize, uint32_t outsize)
 {
     if(mHCom == INVALID_HANDLE_VALUE)
         return false;
@@ -523,8 +479,7 @@ bool SerialPort::setCommBufSize(unsigned int insize, unsigned int outsize)
 */
 inline void SerialPort::lock()
 {
-	if (mCP == CommunicateProtocol::SYNCIO)
-		EnterCriticalSection(&mLock);
+	EnterCriticalSection(&mLock);
 }
 
 /**
@@ -534,8 +489,7 @@ inline void SerialPort::lock()
 */
 inline void SerialPort::unlock()
 {
-	if (mCP == CommunicateProtocol::SYNCIO)
-		LeaveCriticalSection(&mLock);
+	LeaveCriticalSection(&mLock);
 }
 
 /**
@@ -545,40 +499,46 @@ inline void SerialPort::unlock()
 **/
 void SerialPort::close()
 {
-	try
-	{
+
 		if (INVALID_HANDLE_VALUE != this->mHCom)
 		{
-			if (mCP == CommunicateProtocol::ASYNCIO)
-			{
-				// 禁止响应串口所有事件
-				SetCommMask(mHCom, 0);
-				// 清除数据终端就绪信号
-				EscapeCommFunction(mHCom, CLRDTR);
-			}
+			// 禁止响应串口所有事件
+			SetCommMask(mHCom, 0);
+			// 清除数据终端就绪信号
+			EscapeCommFunction(mHCom, CLRDTR);
             // 清理数据缓冲区|终止通信资源读写挂起操作
             PurgeComm( mHCom, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR ) ;
             // 关闭串口句柄
 			CloseHandle(this->mHCom);
 			this->mHCom = INVALID_HANDLE_VALUE;
 		}
-
-	}
-	catch (std::exception e)
-	{
-		// e.what()
-	}
 }
 
 /**
 *
 *获取错误码
-*@return  Windows错误码
+*@return  Windows错误详情
 *
 **/
-int SerialPort::getError() const
+const char* SerialPort::getError()
 {
-	return GetLastError();
+	auto errCode =  GetLastError();
+	auto* buffer = new TCHAR[1024];
+	auto ret = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER,
+		NULL,
+		errCode,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		buffer,
+		sizeof(buffer),
+		NULL);
+
+	if (ret == 0)
+		return NULL;
+
+	auto* err = wcharStrToCharStr(buffer);
+	delete buffer;
+
+	return err;
 }
 
 /**
@@ -592,15 +552,21 @@ bool SerialPort::isOpen() const
 	return (mHCom != INVALID_HANDLE_VALUE);
 }
 
+void SerialPort::setReadCallback(fReadCallback pFun)
+{
+	pReadCallback = pFun;
+	if (thd == nullptr){
+		thd = new std::thread(&asread, this);
+	}
+}
+
 /**
 *string 转 lpcwstr
 **/
-wchar_t* SerialPort::stringTolpcwstr(std::string &str) const
-{
-	size_t size = str.length();
-	wchar_t *buffer = new wchar_t[size + 1];
-	MultiByteToWideChar(CP_ACP, 0, str.c_str(), size, buffer, size * sizeof(wchar_t));
-	buffer[size] = 0;
+char* SerialPort::wcharStrToCharStr(wchar_t* in){
+	int num = WideCharToMultiByte(0, 0, in, -1, NULL, 0, NULL, NULL);
+	auto* chs = new char[num];
+	WideCharToMultiByte(0, 0, in, -1, chs, num, NULL, NULL);
 
-	return buffer;
+	return chs;
 }
