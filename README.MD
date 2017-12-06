@@ -26,7 +26,12 @@ int main()
 	
 	bool ret = sp.open("COM1");
 
-	// to-do with sp
+	// sp.setBaudRate(115200);
+	// sp.setBitsNum(8);
+	// sp.setParity(Parity::NO);
+	// sp.setStopBits(StopBits::ONEBIT);
+	// sp.setFlowControl(FlowControl::NONE);
+	// ...
 	// sp.write(buf, len);
 	
 	std::cin.get();
