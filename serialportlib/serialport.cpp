@@ -1,19 +1,10 @@
-/**
-*
-*Description:串口通用操作类
-*Copyrigth(C),2017,路航科技
-*Date:2017.04.06
-*@author ZhangJie
-*@email  wax628@gmail.com
-*@version 1.0
-*
-**/
-
 #include "serialport.h"
 #include <atomic>
+
 using namespace LuHang;
 
 static std::atomic<bool> stopped = false;
+static const uint32_t MaxBufSize = 4096;
 
 SerialPort::SerialPort(fReadCallback pFun) :
 	mHCom(INVALID_HANDLE_VALUE),
@@ -29,6 +20,8 @@ SerialPort::~SerialPort()
 	stopped = true;
 	if (thd){
 		lock();
+		if (thd->joinable())
+			thd->join();
 		delete thd;
 		unlock();
 	}
@@ -37,21 +30,42 @@ SerialPort::~SerialPort()
     DeleteCriticalSection(&mLock);
 }
 
-void asread(SerialPort* ctx){
-	while (1){
-		if (stopped){
-			break;
+inline void SerialPort::asread(){
+
+	DWORD waitEvent = 0;
+	BOOL status = FALSE;
+	DWORD error;
+	DWORD bytesTransffered = 0;
+	COMSTAT cs = { 0 };
+	char* buf = new char[MaxBufSize];
+	mWaitOL.Offset = 0;
+	mReadOL.Offset = 0;
+
+	while (!stopped){
+		// 初始化读取缓冲区
+		ZeroMemory(buf, sizeof(buf));
+		waitEvent = 0;
+		// 等待事件
+		status = WaitCommEvent(mHCom, &waitEvent, &mWaitOL);
+		if (FALSE == status && GetLastError() == ERROR_IO_PENDING){
+			// 如果串口无数据, 则线程会在此阻塞直到有新数据到来; 如果串口关闭, 则会立即返回false
+			status = GetOverlappedResult(mHCom, &mWaitOL, &bytesTransffered, TRUE);
 		}
 
-		auto* buf = new char[1024];
-		auto ret = ctx->read(buf, sizeof(buf));
-		if (ret > 0){
-			auto* pFun = ctx->getReadCallback();
-			pFun(buf, ret);
+		ClearCommError(mHCom, &error, &cs);
+		// 如果事件发生 并且事件是监听时期望的事件 并且输入缓冲区有数据
+		if (TRUE == status
+			&& waitEvent & EV_RXCHAR
+			&& cs.cbInQue > 0){
+				// 读取数据
+			auto ret = read(buf, MaxBufSize);
+				if (ret > 0){
+					pReadCallback(buf, ret);
+				}
 		}
-
-		Sleep(10);
 	}
+
+	delete buf;
 }
 
 /**
@@ -81,7 +95,7 @@ bool SerialPort::open(const char *lpName)
 		0, \
 		NULL, \
 		OPEN_EXISTING, \
-		FILE_FLAG_OVERLAPPED, \
+		FILE_FLAG_OVERLAPPED|FILE_ATTRIBUTE_NORMAL, \
 		NULL);
 
 	delete buffer;
@@ -90,6 +104,7 @@ bool SerialPort::open(const char *lpName)
 		return false;
 	}
 
+	stopped = false;
 	// 设置串口默认属性
 	GetCommState(mHCom, &mDCB);
     setFlowControl(mFC);
@@ -99,19 +114,36 @@ bool SerialPort::open(const char *lpName)
 	setParityEnable();
 	setBinaryMode();
 	setStopBits();
-	setCommBufSize();
+	setCommBufSize(4096, 4096);
 	setFlowControl();
 
+	// 超时设置
+	COMMTIMEOUTS ct;
+	ct.ReadIntervalTimeout = MAXDWORD; 
+	ct.ReadTotalTimeoutConstant = 0;
+	ct.ReadTotalTimeoutMultiplier = 0;  
+	ct.WriteTotalTimeoutMultiplier = 500;
+	ct.WriteTotalTimeoutConstant = 5000;
+	SetCommTimeouts(mHCom, &ct);
+
+	// 清理
+	PurgeComm(mHCom, PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR | PURGE_TXABORT);
+	// 初始化重叠结构
+	memset(&mReadOL, 0, sizeof(OVERLAPPED));
+	memset(&mWriteOL, 0, sizeof(OVERLAPPED));
+	memset(&mWaitOL, 0, sizeof(OVERLAPPED));
+	// 创建初始无信号及自动reset信号的event
+	mReadOL.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	mWriteOL.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	mWaitOL.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	// 设置事件监听
+	SetCommMask(mHCom, EV_ERR | EV_RXCHAR);
+	// 开启线程
 	if (pReadCallback){
-		thd = new std::thread(&asread, this);
+		thd = new std::thread(&SerialPort::asread, this);
 	}
     
 	return true;
-}
-
-fReadCallback SerialPort::getReadCallback() const
-{
-	return pReadCallback;
 }
 
 /**
@@ -125,58 +157,19 @@ fReadCallback SerialPort::getReadCallback() const
 int32_t SerialPort::read(char *buf, uint32_t len)
 {
 	if (mHCom == INVALID_HANDLE_VALUE
-		|| buf == NULL)
-	{
+		|| buf == NULL){
 		return -1;
 	}
 
 	// 临界区加锁
 	lock();
-	DWORD bytesReaded = len;
-	BOOL rf = TRUE;
-
-	memset(&rdOL, 0, sizeof(OVERLAPPED));
-	// 创建初始event--没置位，无信号模式
-	rdOL.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-
-	bytesReaded = min(bytesReaded, getBytesInCom());
 	// 获取串口输入缓冲区的字节数
-	rf = ReadFile(mHCom, buf, len, &bytesReaded, &rdOL);
-
-	if (!rf)
-	{
-		if (GetLastError() == ERROR_IO_PENDING)
-		{
-			DWORD wait_ret = WaitForSingleObject(rdOL.hEvent, 250);
-			switch (wait_ret)
-			{
-				// func failed
-			case WAIT_FAILED:
-				PurgeComm(mHCom, PURGE_RXCLEAR);
-				CloseHandle(rdOL.hEvent);
-				return -1;
-				// func success status
-			case WAIT_TIMEOUT:
-			case WAIT_ABANDONED:
-			case WAIT_OBJECT_0:
-				GetOverlappedResult(mHCom, &rdOL, &bytesReaded, TRUE);
-				CloseHandle(rdOL.hEvent);
-				return bytesReaded;
-
-			default: return bytesReaded;
-			}
-		}
-		else
-		{
-			PurgeComm(mHCom, PURGE_RXCLEAR | PURGE_RXABORT);
-			unlock();
-			CloseHandle(rdOL.hEvent);
-			return -1;
-		}
-	}
-
+	BOOL rf = TRUE;
+	DWORD bytesReaded = -1;
+	rf = ReadFile(mHCom, buf, len, &bytesReaded, &mReadOL);
+	PurgeComm(mHCom, PURGE_RXCLEAR | PURGE_RXABORT);
+	// 解锁
 	unlock();
-	CloseHandle(rdOL.hEvent);
 
 	return bytesReaded;
 }
@@ -192,54 +185,31 @@ int32_t SerialPort::read(char *buf, uint32_t len)
 int32_t SerialPort::write(const char* buf2write, uint32_t len)
 {
 	if (mHCom == INVALID_HANDLE_VALUE)
-	{
 		return -1;
-	}
 
+	// 清理发送缓冲区
+	PurgeComm(mHCom, PURGE_TXCLEAR | PURGE_TXABORT);
+	mWaitOL.Offset = 0;
 	BOOL ret = TRUE;
 	DWORD bytesSent = 0;
 
-		memset(&wrOL, 0, sizeof(OVERLAPPED));
-		wrOL.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-		// 清除错误标志
-		// ClearCommError(mHCom, &dwErrFlags, &wrStat);
-		// 异步写入数据 
-		ret = WriteFile(mHCom,
+	// 写入数据
+	ret = WriteFile(mHCom,
 			buf2write,
 			len,
 			&bytesSent,
-			&wrOL);
+			&mWriteOL);
 
-	DWORD dwErr = GetLastError();
-	if (!ret)
+	// 等待写入完成
+	if (FALSE == ret && GetLastError() == ERROR_IO_PENDING)
 	{
-		if (ERROR_IO_PENDING == dwErr)
+		if (FALSE == ::GetOverlappedResult(mHCom, &mWriteOL, &bytesSent, TRUE))
 		{
-				DWORD wait_ret = WaitForSingleObject(wrOL.hEvent, 1000);
-                switch(wait_ret)
-                {
-                    // func failed
-                    case WAIT_FAILED: PurgeComm(mHCom, PURGE_TXCLEAR); return -1;
-                    // func success status
-                    case WAIT_TIMEOUT: 
-					case WAIT_ABANDONED:
-					case WAIT_OBJECT_0: 
-						GetOverlappedResult(mHCom, &wrOL, &bytesSent, TRUE); 
-						CloseHandle(wrOL.hEvent);
-						return bytesSent;
-                    default: return bytesSent;
-                }
+			return -1;
 		}
-		else
-        {
-            PurgeComm(mHCom, PURGE_TXCLEAR);
-			CloseHandle(wrOL.hEvent);
-            return -1;
-        }
 	}
 
-	CloseHandle(wrOL.hEvent);
-
+	// 返回实际发送的字节数
 	return bytesSent;
 }
 
@@ -328,16 +298,13 @@ bool SerialPort::setBaudRate(uint32_t baud_rate)
 *@return                   布尔值, 返回是否成功设置
 *
 **/
-bool SerialPort::setBitsNum(uint8_t bits_size)
+bool SerialPort::setBitsNum(uint32_t bits_size)
 {
 	if (INVALID_HANDLE_VALUE == mHCom)
 		return false;
 
 	mDCB.ByteSize = bits_size;
-	if (SetCommState(mHCom, &mDCB))
-		return true;
-
-	return false;
+	return SetCommState(mHCom, &mDCB);
 }
 
 /**
@@ -353,10 +320,7 @@ bool SerialPort::setStopBits(StopBits sb)
 		return false;
 
 	mDCB.StopBits = sb;
-	if (SetCommState(mHCom, &mDCB))
-		return true;
-
-	return false;
+	return SetCommState(mHCom, &mDCB);
 }
 
 /**
@@ -372,10 +336,7 @@ bool SerialPort::setParityEnable(bool enable)
 		return false;
 
 	mDCB.fParity = enable ? 1 : 0;
-	if (SetCommState(mHCom, &mDCB))
-		return true;
-
-	return false;
+	return SetCommState(mHCom, &mDCB);
 }
 
 /**
@@ -410,9 +371,7 @@ void SerialPort::setFlowControl(FlowControl fc)
         return;
     
     mFC = fc;
-    // 流控设置--暂略
-    /*
-    swtich(fc)
+    switch(fc)
     {
         case FlowControl::NONE:
             mDCB.fInX = 0; mDCB.fOutX = 0;
@@ -430,8 +389,8 @@ void SerialPort::setFlowControl(FlowControl fc)
         case FlowControl::DSR_DTR:
             break;
     }
-    SetCommState(hFile, &mDCB);
-    */
+
+    SetCommState(mHCom, &mDCB);
 }
 
 /**
@@ -500,8 +459,9 @@ inline void SerialPort::unlock()
 void SerialPort::close()
 {
 
-		if (INVALID_HANDLE_VALUE != this->mHCom)
+		if (INVALID_HANDLE_VALUE != mHCom)
 		{
+			stopped = true;
 			// 禁止响应串口所有事件
 			SetCommMask(mHCom, 0);
 			// 清除数据终端就绪信号
@@ -556,7 +516,7 @@ void SerialPort::setReadCallback(fReadCallback pFun)
 {
 	pReadCallback = pFun;
 	if (thd == nullptr){
-		thd = new std::thread(&asread, this);
+		thd = new std::thread(&SerialPort::asread, this);
 	}
 }
 
