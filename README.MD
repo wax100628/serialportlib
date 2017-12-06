@@ -23,6 +23,8 @@ int main()
 {
 
 	SerialPort sp(&Callback);
+	
+	bool ret = sp.open("COM1");
 
 	// to-do with sp
 	// sp.write(buf, len);
