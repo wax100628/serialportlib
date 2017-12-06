@@ -7,6 +7,7 @@ Usage:
 ```C++
 
 #include "serialport.h"
+#include <iostream>
 
 #pragma comment(lib, "serialport.lib")
 
@@ -18,11 +19,18 @@ void Callback(const char* data, int len)
 	// to-do with recved data
 }
 
-/* instantiate */
-SerialPort sp(&Callback);
+int main()
+{
 
-// to-do with sp
-// sp.write(buf, len);
+	SerialPort sp(&Callback);
+
+	// to-do with sp
+	// sp.write(buf, len);
+	
+	std::cin.get();
+
+	return 0;
+}
 
 ```
 
