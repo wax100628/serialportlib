@@ -1,4 +1,28 @@
-- **A Simple Lib for Serial Port on Windows**
-=======
-- **AN EXTREMLY SIMPLE LIB FOR SERIAL PORT ON Windows**
+**A Simple Lib for Serial Port on Windows**
+===========================================
+
+Usage:
+-------
+
+```C++
+
+#include "serialport.h"
+
+#pragma comment(lib, "serialport.lib")
+
+using namespace LuHang;
+
+/* When data is comming, Lib calls this function */
+void Callback(const char* data, int len)
+{
+	// to-do with recved data
+}
+
+/* instantiate */
+SerialPort sp(&Callback);
+
+// to-do with sp
+// sp.write(buf, len);
+
+```
 
