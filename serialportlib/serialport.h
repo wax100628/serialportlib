@@ -89,15 +89,15 @@ namespace LuHang{
 
 	private:
 		fReadCallback			pReadCallback;
-		std::thread				*thd;
-		DCB						mDCB;			// 串口设备控制块
-		HANDLE					mHCom;			// 串口句柄
-		OVERLAPPED				mReadOL;		// 异步I/O通信方式下的重叠读操作对象
-		OVERLAPPED				mWriteOL;		// 异步I/O通信方式下的重叠写操作对象
-		OVERLAPPED				mWaitOL;		// 用于等待数据
+		std::thread			*thd;
+		DCB				mDCB;		// 串口设备控制块
+		HANDLE				mHCom;		// 串口句柄
+		OVERLAPPED			mReadOL;	// 异步I/O通信方式下的重叠读操作对象
+		OVERLAPPED			mWriteOL;	// 异步I/O通信方式下的重叠写操作对象
+		OVERLAPPED			mWaitOL;	// 用于等待数据
 		COMMTIMEOUTS			mCommTimeout;	// 超时对象
-		CRITICAL_SECTION		mLock;			// 同步I/O通信方式下的临界区保护锁
-		FlowControl				mFC;			// 流控方式
+		CRITICAL_SECTION		mLock;		// 同步I/O通信方式下的临界区保护锁
+		FlowControl			mFC;		// 流控方式
 	};
 	
 }
