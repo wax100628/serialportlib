@@ -1,9 +1,8 @@
 
 /********************************************************
 *
-* Description:����ͨ�ò�����
+* Description:串口通用操作类
 * 
-* Copyrigth(C),2017,�ɶ�����·���Ƽ�
 * 
 * @author ZhangJie
 * @email  wax628@gmail.com
@@ -35,17 +34,17 @@ typedef void (*fReadCallback)(const char*, int32_t);
 
 namespace LuHang{
 
-	/** ֹͣλ */
+	/** 停止位 */
 	enum SERIALPORT_API StopBits {ONEBIT, ONE5BITS, TWOBITS};
 
-	/** ��żУ�鷽�� */
+	/** 奇偶校验方法 */
 	enum SERIALPORT_API Parity {NO, ODD, EVEN, MARK, SPACE};
 
-	/** �������� */
+	/** 流控类型 */
 	enum SERIALPORT_API FlowControl{NONE, XON_XOFF, RTS_CTS, DSR_DTR};
 
 
-	/** ������ */
+	/** 串口类 */
 	class SERIALPORT_API SerialPort
 	{
 	public:
@@ -91,14 +90,14 @@ namespace LuHang{
 	private:
 		fReadCallback			pReadCallback;
 		std::thread				*thd;
-		DCB						mDCB;			// �����豸���ƿ�
-		HANDLE					mHCom;			// ���ھ��
-		OVERLAPPED				mReadOL;		// �첽I/Oͨ�ŷ�ʽ�µ��ص�����������
-		OVERLAPPED				mWriteOL;		// �첽I/Oͨ�ŷ�ʽ�µ��ص�д��������
-		OVERLAPPED				mWaitOL;		// ���ڵȴ�����
-		COMMTIMEOUTS			mCommTimeout;	// ��ʱ����
-		CRITICAL_SECTION		mLock;			// ͬ��I/Oͨ�ŷ�ʽ�µ��ٽ���������
-		FlowControl				mFC;			// ���ط�ʽ
+		DCB						mDCB;			// 串口设备控制块
+		HANDLE					mHCom;			// 串口句柄
+		OVERLAPPED				mReadOL;		// 异步I/O通信方式下的重叠读操作对象
+		OVERLAPPED				mWriteOL;		// 异步I/O通信方式下的重叠写操作对象
+		OVERLAPPED				mWaitOL;		// 用于等待数据
+		COMMTIMEOUTS			mCommTimeout;	// 超时对象
+		CRITICAL_SECTION		mLock;			// 同步I/O通信方式下的临界区保护锁
+		FlowControl				mFC;			// 流控方式
 	};
 	
 }
